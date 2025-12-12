@@ -1,0 +1,81 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: admin_platform_mongodb
+    restart: always
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin123
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - admin_platform_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: admin_platform_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - admin_platform_network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: admin_platform_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=True
+      - SECRET_KEY=django-insecure-change-this-in-production
+      - DATABASE_NAME=admin_platform
+      - DATABASE_HOST=mongodb
+      - DATABASE_PORT=27017
+      - DATABASE_USER=admin
+      - DATABASE_PASSWORD=admin123
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8000
+    volumes:
+      - ./backend:/app
+    depends_on:
+      - mongodb
+      - redis
+    networks:
+      - admin_platform_network
+    command: python manage.py runserver 0.0.0.0:8000
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: admin_platform_frontend
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000/api
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - admin_platform_network
+
+volumes:
+  mongodb_data:
+  redis_data:
+
+networks:
+  admin_platform_network:
+    driver: bridge

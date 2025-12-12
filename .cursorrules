@@ -1,0 +1,268 @@
+# Admin平台开发规范
+
+## 项目概述
+这是一个基于Python+Django+MongoDB+Ant Design Pro的通用管理平台，支持多企业、数据隔离、消息通知和完整日志系统。
+
+## 技术栈
+- 后端: Python 3.11 + Django 4.2 + MongoDB (使用mongoengine)
+- 前端: Ant Design Pro (React + TypeScript)
+- 数据库: MongoDB 7.0
+- 缓存: Redis 7
+- 容器化: Docker + Docker Compose
+
+## 核心架构原则
+
+### 1. 数据工厂模式
+- 所有数据库操作必须通过 `apps.core.db_factory.DBFactory` 进行
+- 所有模型必须继承自 `apps.core.db_factory.BaseModel`
+- BaseModel提供统一的基础字段：id, company_id, created_at, updated_at, is_deleted, created_by, updated_by
+- 所有查询自动过滤已删除数据（is_deleted=False）
+- 所有操作自动关联company_id实现数据隔离
+
+### 2. 企业数据隔离
+- 每个模型必须包含company_id字段
+- 所有查询必须通过company_id过滤
+- 使用 `CompanyIsolationMiddleware` 自动从请求中获取company_id
+- 请求头使用 `X-Company-Id` 传递企业ID
+
+### 3. 用户-企业多对多关系
+- User模型包含company_ids列表和default_company_id
+- Company模型包含member_ids列表和owner_id
+- 注册用户时自动创建企业并建立关联
+- 支持通过邀请码加入其他企业
+
+### 4. 认证授权
+- 使用JWT认证（apps.core.authentication.JWTAuthentication）
+- Token通过Authorization头传递：`Bearer <token>`
+- 使用apps.core.utils.generate_jwt_token生成token
+
+### 5. 日志系统
+- 操作日志：记录用户的所有API操作（通过LoggingMiddleware自动记录）
+- 系统日志：记录系统级别的错误和重要事件
+- 所有日志包含company_id实现数据隔离
+
+### 6. 消息通知
+- 支持实时通知（WebSocket）
+- 通知类型：system, message, alert等
+- 支持未读计数和批量标记已读
+
+## 代码规范
+
+### 模型定义
+```python
+from apps.core.db_factory import BaseModel
+from mongoengine.fields import StringField, ObjectIdField
+
+class MyModel(BaseModel):
+    meta = {
+        'collection': 'my_collection',
+        'indexes': ['company_id', 'field_name'],
+    }
+    
+    field_name = StringField(required=True, max_length=100)
+    # 其他字段...
+```
+
+### 视图定义
+```python
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from apps.core.db_factory import DBFactory
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def my_view(request):
+    company_id = request.company_id  # 从中间件获取
+    if not company_id:
+        return Response({'error': '请选择企业'}, status=400)
+    
+    # 使用DBFactory操作
+    items = DBFactory.list(MyModel, company_id, skip=0, limit=20)
+    # ...
+```
+
+### 序列化器定义
+```python
+from rest_framework import serializers
+
+class MyModelSerializer(serializers.Serializer):
+    id = serializers.CharField(read_only=True)
+    field_name = serializers.CharField()
+    
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if isinstance(instance, MyModel):
+            data['id'] = str(instance.id)
+        return data
+```
+
+## 文件组织
+
+### 后端应用结构
+```
+apps/
+├── core/              # 核心模块
+│   ├── db_factory.py  # 数据工厂和基类
+│   ├── middleware.py  # 中间件
+│   ├── authentication.py  # 认证
+│   └── utils.py       # 工具函数
+├── users/             # 用户模块
+│   ├── models.py
+│   ├── serializers.py
+│   ├── views.py
+│   └── urls.py
+├── companies/         # 企业模块
+├── notifications/     # 通知模块
+└── logs/              # 日志模块
+```
+
+### URL配置
+- 所有API路径以 `/api/` 开头
+- 认证相关：`/api/auth/`
+- 企业相关：`/api/companies/`
+- 通知相关：`/api/notifications/`
+- 日志相关：`/api/logs/`
+
+## 数据库操作规范
+
+### 必须使用DBFactory
+- ✅ 使用：`DBFactory.create()`, `DBFactory.get()`, `DBFactory.list()`, `DBFactory.update()`, `DBFactory.delete()`
+- ❌ 禁止：直接使用 `Model.objects.create()`, `Model.objects.filter()` 等
+
+### 必须包含company_id
+- 所有查询必须传入company_id
+- 所有创建必须设置company_id
+- 所有更新必须验证company_id匹配
+
+### 软删除
+- 使用 `DBFactory.delete()` 进行软删除
+- 所有查询自动过滤 `is_deleted=False`
+- 需要硬删除时使用 `DBFactory.hard_delete()`
+
+## 错误处理
+
+### 统一错误响应格式
+```python
+return Response({'error': '错误信息'}, status=status.HTTP_400_BAD_REQUEST)
+```
+
+### 常见错误码
+- 400: 请求参数错误
+- 401: 未认证
+- 403: 无权限
+- 404: 资源不存在
+- 500: 服务器错误
+
+## 测试要求
+
+### 必须测试的场景
+- 用户注册和登录
+- 企业创建和加入
+- 数据隔离（不同企业无法访问对方数据）
+- 通知创建和读取
+- 日志记录
+
+## Docker规范
+
+### 服务命名
+- mongodb: `admin_platform_mongodb`
+- redis: `admin_platform_redis`
+- backend: `admin_platform_backend`
+- frontend: `admin_platform_frontend`
+
+### 网络
+- 所有服务在同一网络：`admin_platform_network`
+
+### 环境变量
+- 使用 `.env` 文件管理配置
+- 提供 `.env.example` 作为模板
+
+## 前端开发规范
+
+### Ant Design Pro
+- 使用 `pro create platform` 创建的项目结构
+- 遵循Ant Design Pro的代码规范
+- 使用TypeScript进行类型定义
+
+### API调用
+- 使用统一的API客户端
+- 所有请求包含Authorization头
+- 切换企业时更新X-Company-Id头
+
+## 安全规范
+
+### 密码处理
+- 使用bcrypt加密存储
+- 使用passlib库进行密码验证
+
+### JWT Token
+- Token包含user_id和过期时间
+- 使用HS256算法
+- 默认24小时过期
+
+### 数据验证
+- 所有输入必须验证
+- 使用Django REST Framework的序列化器验证
+- 防止SQL注入和XSS攻击
+
+## 性能优化
+
+### 数据库索引
+- company_id必须建立索引
+- 常用查询字段建立索引
+- 复合索引优化多条件查询
+
+### 缓存策略
+- 使用Redis缓存热点数据
+- 用户信息、企业信息可缓存
+- 设置合理的过期时间
+
+## 日志规范
+
+### 操作日志
+- 自动记录所有非GET的API请求
+- 记录用户ID、企业ID、操作类型、IP地址
+- 记录操作前后数据（可选）
+
+### 系统日志
+- 记录系统错误和异常
+- 记录重要业务事件
+- 包含完整的堆栈信息
+
+## 注意事项
+
+1. **数据隔离是核心**：所有操作必须验证company_id，确保不同企业的数据完全隔离
+2. **使用数据工厂**：不要直接操作数据库，必须通过DBFactory
+3. **软删除优先**：除非必要，使用软删除而非硬删除
+4. **错误处理**：所有API必须返回统一的错误格式
+5. **日志记录**：重要操作必须记录日志
+6. **类型转换**：ObjectId和字符串之间的转换要正确处理
+7. **时区处理**：使用Asia/Shanghai时区，所有时间字段使用datetime类型
+
+## 开发流程
+
+1. 创建模型（继承BaseModel）
+2. 创建序列化器
+3. 创建视图（使用DBFactory）
+4. 配置URL
+5. 测试数据隔离
+6. 添加日志记录
+7. 编写API文档
+
+## 常见问题
+
+### Q: 如何创建新模型？
+A: 继承BaseModel，定义meta和字段，使用DBFactory进行操作。
+
+### Q: 如何实现数据隔离？
+A: 所有查询通过company_id过滤，使用CompanyIsolationMiddleware自动获取company_id。
+
+### Q: 如何处理用户-企业关系？
+A: User.company_ids存储所属企业列表，Company.member_ids存储成员列表，维护双向关系。
+
+### Q: 如何发送通知？
+A: 使用Notification.create_notification()创建通知，通过WebSocket实时推送。
+
+### Q: 如何记录日志？
+A: 操作日志通过LoggingMiddleware自动记录，系统日志使用SystemLog.create_log()。
